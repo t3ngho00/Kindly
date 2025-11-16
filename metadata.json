@@ -1,0 +1,7 @@
+{
+  "name": "Nostalgia Radio AI",
+  "description": "A conversational voice companion designed for older adults, disguised as a familiar radio. It offers warm conversation, plays era-appropriate music, and gently prompts movement, reflection, and social connection without the need for complex digital interfaces.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
