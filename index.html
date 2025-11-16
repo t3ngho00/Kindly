@@ -2,7 +2,6 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Nostalgia Radio AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -89,14 +88,11 @@ const getNewsHeadlinesFunctionDeclaration = {
 };
 
 const getAi = () => {
-  if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable not set.");
-  }
+  // This function now assumes the API key is ready via the selection flow.
   return new GoogleGenAI({ apiKey: process.env.API_KEY });
 }
 
 async function fetchNewsSummary() {
-  try {
     const ai = getAi();
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
@@ -104,10 +100,6 @@ async function fetchNewsSummary() {
       config: { tools: [{ googleSearch: {} }] },
     });
     return response.text;
-  } catch (error) {
-    console.error("Error fetching news summary:", error);
-    return "I'm sorry, I'm having trouble fetching the news right now. Please try again in a moment.";
-  }
 }
 
 function encode(bytes) {
@@ -292,7 +284,7 @@ const RadioInterface = ({ isActive, statusMessage, transcripts, currentInput, cu
 );
 
 // --- Inlined App.js ---
-const App = () => {
+const App = ({ onApiKeyError }) => {
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Click the dial to start');
   const [transcripts, setTranscripts] = useState([]);
@@ -312,6 +304,9 @@ const App = () => {
 
   const currentInputRef = useRef('');
   const currentOutputRef = useRef('');
+  const onApiKeyErrorRef = useRef(onApiKeyError);
+  onApiKeyErrorRef.current = onApiKeyError;
+
 
   useEffect(() => { currentInputRef.current = currentInput; }, [currentInput]);
   useEffect(() => { currentOutputRef.current = currentOutput; }, [currentOutput]);
@@ -373,12 +368,13 @@ const App = () => {
       return;
     }
 
+    let songForPrompt = null;
+
     try {
       setStatusMessage('Getting microphone...');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
-      let songForPrompt = null;
       await new Promise(async (resolve) => {
         const songData = finnishNostalgiaSongs[Math.floor(Math.random() * finnishNostalgiaSongs.length)];
         setStatusMessage(`Finding a memory...`);
@@ -409,7 +405,7 @@ const App = () => {
                 if (!audio.paused) audio.pause();
                 setNowPlaying(null);
                 resolve();
-              }, 10000);
+              }, 1000);
             }).catch(error => {
               console.error("Audio playback failed:", error);
               setNowPlaying(null);
@@ -426,7 +422,7 @@ const App = () => {
           resolve();
         }
       });
-
+      
       setIsSessionActive(true);
       inputAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
@@ -517,9 +513,21 @@ const App = () => {
                     result = { result: "I've stopped the music." };
                 } else if (fc.name === 'getNewsHeadlines') {
                     setStatusMessage("Looking up the latest headlines...");
-                    const summary = await fetchNewsSummary();
-                    setStatusMessage("Here's the latest news.");
-                    result = { result: summary };
+                    try {
+                      const summary = await fetchNewsSummary();
+                      setStatusMessage("Here's the latest news.");
+                      result = { result: summary };
+                    } catch (error) {
+                      if (error instanceof Error && error.message.includes("Requested entity was not found.")) {
+                        onApiKeyErrorRef.current();
+                        setStatusMessage("API Key error. Please restart.");
+                        result = { result: "I'm sorry, there's an issue with my news connection due to an invalid API Key." };
+                      } else {
+                        console.error("Error fetching news summary:", error);
+                        setStatusMessage("Error fetching news.");
+                        result = { result: "I'm sorry, I'm having trouble fetching the news right now. Please try again in a moment." };
+                      }
+                    }
                 } else {
                     result = { result: 'Unknown function call.' };
                 }
@@ -578,6 +586,9 @@ const App = () => {
             await sessionPromise;
             return sessionPromise;
           } catch (error) {
+            if (error instanceof Error && error.message.includes("Requested entity was not found.")) {
+                throw error; // Re-throw to be caught by the outer catch
+            }
             const isRetryable = error instanceof Error && (error.message.includes('unavailable') || error.message.includes('503'));
             if (!isRetryable || attempt === maxRetries - 1) throw error;
             const delay = initialDelay * Math.pow(2, attempt);
@@ -587,15 +598,20 @@ const App = () => {
         }
       };
 
-      sessionPromiseRef.current = connectWithRetries();
+      sessionPromiseRef.current = await connectWithRetries();
 
     } catch (error) {
       console.error('Failed to start session:', error);
-      setStatusMessage('Could not access microphone or connection failed.');
+      if (error instanceof Error && error.message.includes("Requested entity was not found.")) {
+        onApiKeyError();
+        setStatusMessage('API Key is invalid. Please select a valid key.');
+      } else {
+        setStatusMessage('Could not access microphone or connection failed.');
+      }
       setIsSessionActive(false);
       cleanupAudio();
     }
-  }, [isSessionActive, cleanupAudio, handleStopMusic, sendSilentAudioPrompt]);
+  }, [isSessionActive, cleanupAudio, handleStopMusic, sendSilentAudioPrompt, onApiKeyError]);
 
   const getDisplayStatus = () => {
     if (nowPlaying) {
@@ -623,13 +639,86 @@ const App = () => {
   );
 };
 
+// --- New AppContainer to handle API Key selection ---
+const AppContainer = () => {
+    const [isKeyReady, setIsKeyReady] = useState(false);
+    const [isCheckingKey, setIsCheckingKey] = useState(true);
+
+    const checkKey = useCallback(async () => {
+        setIsCheckingKey(true);
+        try {
+            if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
+                const hasKey = await window.aistudio.hasSelectedApiKey();
+                setIsKeyReady(hasKey);
+            } else {
+                // If aistudio is not available, assume key is present and let it fail later if not.
+                // This allows the app to potentially run in other environments.
+                setIsKeyReady(true);
+            }
+        } catch (e) {
+            console.error("Error checking for API key:", e);
+            // Default to showing the key selector on error.
+            setIsKeyReady(false);
+        }
+        setIsCheckingKey(false);
+    }, []);
+
+    useEffect(() => {
+        checkKey();
+    }, [checkKey]);
+
+    const handleSelectKey = async () => {
+        try {
+            if (window.aistudio && typeof window.aistudio.openSelectKey === 'function') {
+                await window.aistudio.openSelectKey();
+                // Assume success and update UI immediately as per guidelines
+                setIsKeyReady(true);
+            } else {
+                alert("API key selection is not available in this environment.");
+            }
+        } catch (e) {
+            console.error("Error opening API key selection:", e);
+        }
+    };
+    
+    const handleApiKeyError = useCallback(() => {
+        setIsKeyReady(false);
+    }, []);
+
+    if (isCheckingKey) {
+        return React.createElement('div', { className: 'flex items-center justify-center min-h-screen text-xl font-serif text-[#4a3728]' }, 'Initializing Radio...');
+    }
+
+    if (!isKeyReady) {
+        return React.createElement(
+            'div',
+            { className: 'flex flex-col items-center justify-center min-h-screen font-serif bg-gradient-to-br from-[#F5F5DC] to-[#D2B48C] p-4 text-center' },
+            React.createElement('div', { className: 'bg-[#c0a080] p-8 rounded-2xl shadow-2xl border-4 border-[#5b4636] max-w-lg'},
+              React.createElement('h1', { className: 'text-3xl font-bold text-[#4a3728] mb-4' }, 'Welcome to Nostalgia Radio AI'),
+              React.createElement('p', { className: 'text-lg text-[#5b4636] mb-6' }, 'This application requires a Google AI API key to function. Please select your API key to continue. Using this service may incur costs.'),
+              React.createElement('button', {
+                  onClick: handleSelectKey,
+                  className: 'px-6 py-3 bg-amber-500 text-[#4a3728] font-bold rounded-lg shadow-md hover:bg-amber-600 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400 focus:ring-opacity-75'
+              }, 'Select API Key'),
+              React.createElement('p', { className: 'mt-4 text-sm text-[#5b4636]' },
+                  'For more information on billing, please visit: ',
+                  React.createElement('a', { href: 'https://ai.google.dev/gemini-api/docs/billing', target: '_blank', rel: 'noopener noreferrer', className: 'underline hover:text-amber-700' }, 'ai.google.dev/gemini-api/docs/billing')
+              )
+            )
+        );
+    }
+
+    return React.createElement(App, { onApiKeyError: handleApiKeyError });
+};
+
+
 // --- Inlined index.js ---
 const rootElement = document.getElementById('root');
 if (!rootElement) {
   throw new Error("Could not find root element to mount to");
 }
 const root = ReactDOM.createRoot(rootElement);
-root.render(React.createElement(React.StrictMode, null, React.createElement(App, null)));
+root.render(React.createElement(React.StrictMode, null, React.createElement(AppContainer, null)));
 
     </script>
   </body>
